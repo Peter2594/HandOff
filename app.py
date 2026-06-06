@@ -2,6 +2,10 @@ import os
 import json
 import logging
 import threading
+import urllib.request
+import re
+import ipaddress
+from urllib.parse import urlparse
 from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,21 @@ def create_app():
         users = User.query.all()
         return jsonify([u.to_dict() for u in users])
 
+    @app.route('/api/users/<user_id>', methods=['PATCH'])
+    def update_user(user_id):
+        u = db.session.get(User, user_id)
+        if not u:
+            return jsonify({'error': 'User not found'}), 404
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'JSON body required'}), 400
+        if 'departing' in data:
+            u.departing = bool(data['departing'])
+        if 'last_day' in data:
+            u.last_day = data['last_day'] or None
+        db.session.commit()
+        return jsonify(u.to_dict())
+
     # ── Branches ─────────────────────────────────────────────────────────────
     @app.route('/api/branches')
     def get_branches():
@@ -150,8 +169,14 @@ def create_app():
 
         node_type = data.get('type', 'note')
         meta = data.get('metadata', {})
-        # Derive content from metadata title or raw content
         content = data.get('content') or meta.get('title') or 'Untitled'
+
+        # Auto-fetch page title for link nodes (only for safe external URLs)
+        if node_type == 'link' and content.startswith('http') and not meta.get('title') and _is_safe_url(content):
+            fetched = _fetch_url_title(content)
+            if fetched:
+                meta = dict(meta)
+                meta['title'] = fetched
 
         n = Node(
             branch_id=branch_id,
@@ -387,8 +412,10 @@ def create_app():
 
         branch_data = []
         for b in branches:
-            entry_nodes = [n.to_dict() for n in b.nodes if n.type != 'task']
-            task_nodes = [n.to_dict() for n in b.nodes if n.type == 'task']
+            entry_nodes = [n.to_dict() for n in b.nodes
+                           if n.type != 'task' and n.created_by == user_id]
+            task_nodes = [n.to_dict() for n in b.nodes
+                          if n.type == 'task' and (n.created_by == user_id or n.assigned_to == user_id)]
             branch_data.append({
                 'branch': b.to_dict(),
                 'nodes': entry_nodes,
@@ -408,6 +435,48 @@ def create_app():
             return jsonify({'source': 'heuristic', 'branch_data': branch_data})
 
     return app
+
+
+def _is_safe_url(url):
+    """Return False for localhost, loopback, and RFC-1918/link-local addresses."""
+    try:
+        parsed = urlparse(url)
+        if parsed.scheme not in ('http', 'https'):
+            return False
+        host = parsed.hostname or ''
+        if not host:
+            return False
+        try:
+            addr = ipaddress.ip_address(host)
+            return not (addr.is_private or addr.is_loopback or addr.is_link_local)
+        except ValueError:
+            # Hostname (not a raw IP) — block obvious local names
+            return host.lower() not in ('localhost', 'localhost.localdomain')
+    except Exception:
+        return False
+
+
+def _fetch_url_title(url):
+    """Fetch the <title> of a URL, returning None on any failure."""
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0 (compatible; HandoffBot/1.0)'},
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            raw = resp.read(16384)
+            charset = 'utf-8'
+            ct = resp.headers.get_content_charset()
+            if ct:
+                charset = ct
+            html = raw.decode(charset, errors='ignore')
+        m = re.search(r'<title[^>]*>([^<]{1,300})</title>', html, re.IGNORECASE | re.DOTALL)
+        if m:
+            title = re.sub(r'\s+', ' ', m.group(1)).strip()
+            return title[:200] if title else None
+    except Exception:
+        pass
+    return None
 
 
 def _trigger_decision_links(app, ai, decision_node_id):

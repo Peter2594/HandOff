@@ -1654,8 +1654,23 @@ function TeamPanel({ hiddenUsers, onToggle, onRefresh }) {
 }
 
 // ── Timeline screen ────────────────────────────────────────────────────────
-function TimelineScreen({ styleVariant = 'railway', currentUser, onGenerateHandover, onRefresh }) {
-  const { LANES, ENTRIES, TASKS, LINKS, frac } = window.HANDOFF;
+function TimelineScreen({ styleVariant = 'railway', currentUser, selectedBranchId, onGenerateHandover, onRefresh }) {
+  const { LANES, ENTRIES, TASKS, LINKS } = window.HANDOFF;
+
+  // Collect selected branch + all its descendants recursively
+  const visibleLanes = selectedBranchId
+    ? (() => {
+        const result = [];
+        const add = (id) => {
+          const lane = LANES.find(l => l.id === id);
+          if (!lane) return;
+          result.push(lane);
+          LANES.filter(l => l.parent_id === id).forEach(l => add(l.id));
+        };
+        add(selectedBranchId);
+        return result;
+      })()
+    : LANES;
   const [selected, setSelected] = useState(null);
   const [selectedTask, setSelectedTask] = useState(null);
   const [quickAdd, setQuickAdd] = useState(null);
@@ -1672,6 +1687,22 @@ function TimelineScreen({ styleVariant = 'railway', currentUser, onGenerateHando
   const containerRef = useRef(null);
   const [containerW, setContainerW] = useState(1800);
 
+  // Update global frac/window based on current range (runs synchronously before children render)
+  const NOW = window.HANDOFF.NOW;
+  const rangeDays = { '7D': 7, '30D': 30, '90D': 90 }[range];
+  const dynWinStart = range === 'All'
+    ? (() => {
+        const ts = [...ENTRIES, ...TASKS].filter(x => x.date).map(x => new Date(x.date).getTime());
+        return ts.length ? new Date(Math.min(...ts)) : new Date(NOW.getTime() - 180 * 86400000);
+      })()
+    : new Date(NOW.getTime() - rangeDays * 86400000);
+  window.HANDOFF.WIN_START = dynWinStart;
+  window.HANDOFF.WIN_END = NOW;
+  window.HANDOFF.frac = (iso) => {
+    const t = new Date(iso).getTime();
+    return Math.min(1, Math.max(0, (t - dynWinStart.getTime()) / (NOW.getTime() - dynWinStart.getTime())));
+  };
+
   useEffect(() => {
     if (!containerRef.current) return;
     const obs = new ResizeObserver(entries => setContainerW(entries[0].contentRect.width));
@@ -1681,16 +1712,17 @@ function TimelineScreen({ styleVariant = 'railway', currentUser, onGenerateHando
 
   // Pre-compute spread-adjusted fracs for ALL nodes (used by the SVG overlay)
   const fracAdjAll = useMemo(() => {
+    const f = window.HANDOFF.frac;
     const result = {};
     LANES.forEach(lane => {
       const { map } = spreadFracs([
-        ...ENTRIES.filter(e => e.lane === lane.id).map(e => ({ id: e.id, f: frac(e.date) })),
-        ...TASKS.filter(t => t.lane === lane.id).map(t => ({ id: t.id, f: frac(t.date) })),
+        ...ENTRIES.filter(e => e.lane === lane.id).map(e => ({ id: e.id, f: f(e.date) })),
+        ...TASKS.filter(t => t.lane === lane.id).map(t => ({ id: t.id, f: f(t.date) })),
       ]);
       Object.assign(result, map);
     });
     return result;
-  }, [ENTRIES, TASKS, LANES]);
+  }, [ENTRIES, TASKS, LANES, range]);
 
   const handleEntrySelect = (e) => {
     setSelected(e);
@@ -1751,7 +1783,7 @@ function TimelineScreen({ styleVariant = 'railway', currentUser, onGenerateHando
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
         <div style={{ flex: 1, overflow: 'auto', padding: '20px 22px 8px' }}>
           <div ref={containerRef} style={{ minWidth: 1800, position: 'relative' }}>
-            {LANES.map((lane, i) => (
+            {visibleLanes.map((lane, i) => (
               <Lane key={lane.id} lane={lane} style={{ ...style, idx: i }} filters={filters} hiddenUsers={hiddenUsers}
                 onSelect={handleEntrySelect}
                 onTaskSelect={setSelectedTask}

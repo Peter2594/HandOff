@@ -287,6 +287,15 @@ const API = {
     });
     return r.json();
   },
+
+  async updateUser(userId, data) {
+    const r = await fetch(`/api/users/${userId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data),
+    });
+    return r.json();
+  },
 };
 
 window.loadHandoffData = loadHandoffData;

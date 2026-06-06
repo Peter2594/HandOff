@@ -18,6 +18,6 @@ if [ ! -f ".env" ]; then
 fi
 
 echo ""
-echo "Starting Handoff on http://localhost:5010"
+echo "Starting Handoff on http://localhost:5001"
 echo ""
 .venv/bin/python app.py

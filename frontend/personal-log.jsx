@@ -473,13 +473,57 @@ function LogCard({ e }) {
 }
 
 // ── Weekly digest modal ────────────────────────────────────────────────────
+function digestToMarkdown(digest) {
+  if (!digest) return '';
+  const lines = [`# ${digest.week || 'Weekly Digest'}`, ''];
+  (digest.sections || []).forEach(s => {
+    lines.push(`## ${s.h}`);
+    (s.items || []).forEach(it => lines.push(`- ${it}`));
+    lines.push('');
+  });
+  return lines.join('\n');
+}
+
 function DigestModal({ currentUser, onClose }) {
   const [phase, setPhase] = useStatePL('generating');
   const [digest, setDigest] = useStatePL(null);
   const [error, setError] = useStatePL(null);
   const [step, setStep] = useStatePL(0);
+  const [toast, setToast] = useStatePL(null);
 
   const GEN_STEPS = ['Collecting entries from the past 7 days…', 'Clustering by lane and decision…', 'Drafting structured summary…', 'Polishing prose…'];
+
+  const ping = msg => { setToast(msg); setTimeout(() => setToast(null), 1800); };
+
+  const copyMd = async () => {
+    const md = digestToMarkdown(digest);
+    try {
+      await navigator.clipboard.writeText(md);
+      ping('Copied to clipboard');
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = md;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      ping('Copied to clipboard');
+    }
+  };
+
+  const downloadMd = () => {
+    const md = digestToMarkdown(digest);
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `weekly-digest.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    ping('Downloaded');
+  };
 
   // Kick off AI call immediately; show animation while we wait
   useEffectPL(() => {
@@ -549,8 +593,9 @@ function DigestModal({ currentUser, onClose }) {
         )}
 
         {phase === 'review' && (
-          <div style={{ display: 'flex', gap: 9, padding: '13px 18px', borderTop: '1px solid var(--border-soft)' }}>
-            <span style={{ fontSize: 11.5, color: 'var(--muted)', alignSelf: 'center' }}>Review before publishing — your manager sees this read-only.</span>
+          <div style={{ display: 'flex', gap: 9, padding: '13px 18px', borderTop: '1px solid var(--border-soft)', flexWrap: 'wrap' }}>
+            <button className="btn" onClick={copyMd}><Icon name="copy" size={14} color="var(--muted-2)" /> Copy MD</button>
+            <button className="btn" onClick={downloadMd}><Icon name="download" size={14} color="var(--muted-2)" /> Download</button>
             <div style={{ flex: 1 }} />
             <button className="btn btn-primary" onClick={() => setPhase('published')}>Publish digest</button>
           </div>
@@ -559,7 +604,14 @@ function DigestModal({ currentUser, onClose }) {
           <div style={{ display: 'flex', alignItems: 'center', gap: 9, padding: '14px 18px', borderTop: '1px solid var(--border-soft)' }}>
             <Icon name="check" size={16} color="var(--green)" />
             <span style={{ fontSize: 13, color: '#d2d2da' }}>Published to your weekly report.</span>
+            <button className="btn" style={{ marginLeft: 4 }} onClick={copyMd}><Icon name="copy" size={14} color="var(--muted-2)" /> Copy MD</button>
             <button className="btn btn-primary" style={{ marginLeft: 'auto' }} onClick={onClose}>Done</button>
+          </div>
+        )}
+
+        {toast && (
+          <div className="pop-in" style={{ position: 'absolute', bottom: 12, left: '50%', transform: 'translateX(-50%)', background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '9px 14px', fontSize: 13, display: 'flex', alignItems: 'center', gap: 8, boxShadow: '0 8px 24px rgba(0,0,0,.5)', zIndex: 99 }}>
+            <Icon name="check" size={14} color="var(--green)" /> {toast}
           </div>
         )}
       </div>

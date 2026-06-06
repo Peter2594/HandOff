@@ -6,10 +6,84 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "accent": "#7F77DD"
 }/*EDITMODE-END*/;
 
+// ── Profile settings modal ─────────────────────────────────────────────────
+function ProfileModal({ userId, onClose, onSaved }) {
+  const { PEOPLE } = window.HANDOFF;
+  const person = PEOPLE[userId];
+  const [departing, setDeparting] = useState(person ? person.departing : false);
+  const [lastDay, setLastDay] = useState(person ? (person.lastDay || '') : '');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState(null);
+
+  if (!person || person.isManager) return null;
+
+  const save = async () => {
+    setSaving(true);
+    setSaveError(null);
+    try {
+      await API.updateUser(userId, { departing, last_day: lastDay || null });
+      person.departing = departing;
+      person.lastDay = lastDay;
+      onSaved();
+      onClose();
+    } catch {
+      setSaveError('Failed to save. Please try again.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <>
+      <div onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 300, animation: 'fadeIn .15s ease both' }} />
+      <div className="pop-in" style={{
+        position: 'fixed', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+        width: 380, zIndex: 301, background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 14, boxShadow: '0 30px 80px rgba(0,0,0,.6)', overflow: 'hidden',
+      }}>
+        <div style={{ padding: '18px 20px 6px' }}>
+          <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 4 }}>Profile settings</div>
+          <div style={{ fontSize: 12.5, color: 'var(--muted)' }}>{person.name}</div>
+        </div>
+        <div style={{ padding: '16px 20px' }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 12, cursor: 'pointer', padding: '10px 12px', borderRadius: 8, border: `1px solid ${departing ? 'var(--red)' : 'var(--border)'}`, background: departing ? '#E24B4a0d' : 'var(--surface-2)' }}>
+            <input type="checkbox" checked={departing} onChange={e => setDeparting(e.target.checked)}
+              style={{ width: 16, height: 16, accentColor: 'var(--red)', cursor: 'pointer' }} />
+            <div>
+              <div style={{ fontSize: 13.5, fontWeight: 500, color: departing ? '#f0c8c7' : 'var(--text)' }}>Mark as departing</div>
+              <div style={{ fontSize: 11.5, color: 'var(--muted)', marginTop: 2 }}>Enables handover export and shows departing badge</div>
+            </div>
+          </label>
+          {departing && (
+            <div style={{ marginTop: 12, animation: 'slideUp .15s ease both' }}>
+              <label style={{ fontSize: 12, color: 'var(--muted)', display: 'block', marginBottom: 6 }}>Last day (e.g. "Jun 13")</label>
+              <input
+                value={lastDay}
+                onChange={e => setLastDay(e.target.value)}
+                placeholder="Jun 13"
+                style={{ width: '100%', background: 'var(--bg)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 11px', color: 'var(--text)', fontSize: 13.5, outline: 'none', boxSizing: 'border-box' }}
+              />
+            </div>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 9, padding: '10px 18px 16px', flexWrap: 'wrap' }}>
+          {saveError && <div style={{ width: '100%', fontSize: 12, color: 'var(--red)', marginBottom: 4 }}>{saveError}</div>}
+          <div style={{ flex: 1 }} />
+          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-primary" disabled={saving} onClick={save}>
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── User switcher popover ──────────────────────────────────────────────────
-function UserSwitcher({ currentUser, onSwitch }) {
+function UserSwitcher({ currentUser, onSwitch, onRefresh }) {
   const { PEOPLE } = window.HANDOFF;
   const [open, setOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
   const me = PEOPLE[currentUser];
   if (!me) return null;
 
@@ -26,7 +100,7 @@ function UserSwitcher({ currentUser, onSwitch }) {
         <>
           <div onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 200 }} />
           <div className="pop-in" style={{
-            position: 'absolute', right: 0, top: 'calc(100% + 6px)', width: 230, zIndex: 201,
+            position: 'absolute', right: 0, top: 'calc(100% + 6px)', width: 240, zIndex: 201,
             background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 10,
             padding: 8, boxShadow: '0 14px 40px rgba(0,0,0,.5)',
           }}>
@@ -46,8 +120,28 @@ function UserSwitcher({ currentUser, onSwitch }) {
                 {p.id === currentUser && <Icon name="check" size={14} color="var(--purple)" />}
               </button>
             ))}
+            {!me.isManager && (
+              <>
+                <div style={{ height: 1, background: 'var(--border)', margin: '6px 0' }} />
+                <button onClick={() => { setOpen(false); setProfileOpen(true); }}
+                  style={{ display: 'flex', alignItems: 'center', gap: 9, width: '100%', padding: '7px 8px', border: 'none', borderRadius: 7, cursor: 'pointer', color: 'var(--muted-2)', fontSize: 12.5, background: 'none' }}
+                  onMouseEnter={e => e.currentTarget.style.background = '#ffffff0d'}
+                  onMouseLeave={e => e.currentTarget.style.background = 'none'}>
+                  <Icon name="edit" size={14} color="var(--muted)" />
+                  Profile settings
+                </button>
+              </>
+            )}
           </div>
         </>
+      )}
+
+      {profileOpen && (
+        <ProfileModal
+          userId={currentUser}
+          onClose={() => setProfileOpen(false)}
+          onSaved={onRefresh}
+        />
       )}
     </div>
   );
@@ -63,8 +157,8 @@ function OverdueBadge({ currentUser }) {
 }
 
 // ── Persistent nav bar ─────────────────────────────────────────────────────
-function NavBar({ currentUser, onSwitchUser, screen, onGoTo }) {
-  const { PEOPLE, PROJECT } = window.HANDOFF;
+function NavBar({ currentUser, onSwitchUser, screen, onGoTo, onRefresh, selectedBranchId, onSelectBranch }) {
+  const { PEOPLE, PROJECT, LANES } = window.HANDOFF;
   const me = PEOPLE[currentUser];
   const isManager = me && me.isManager;
 
@@ -86,7 +180,7 @@ function NavBar({ currentUser, onSwitchUser, screen, onGoTo }) {
       {/* Logo + project */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{ width: 20, height: 20, borderRadius: 5, background: 'var(--purple)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 700, color: '#fff' }}>H</div>
-        <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>{PROJECT ? PROJECT.name : 'Handoff'}</span>
+        <span style={{ fontSize: 13.5, fontWeight: 600, color: 'var(--text)' }}>Handoff</span>
       </div>
 
       <div style={{ width: 1, height: 18, background: 'var(--border)', margin: '0 2px' }} />
@@ -109,6 +203,22 @@ function NavBar({ currentUser, onSwitchUser, screen, onGoTo }) {
         })}
       </div>
 
+      {/* Branch filter — timeline only */}
+      {screen === 'timeline' && LANES && LANES.length > 1 && (
+        <div style={{ position: 'relative' }}>
+          <select
+            value={selectedBranchId || ''}
+            onChange={e => onSelectBranch(e.target.value || null)}
+            style={{ padding: '4px 26px 4px 9px', background: 'var(--surface)', border: `1px solid ${selectedBranchId ? 'var(--purple)' : 'var(--border)'}`, borderRadius: 7, color: selectedBranchId ? 'var(--text)' : 'var(--muted)', fontSize: 12.5, outline: 'none', appearance: 'none', cursor: 'pointer' }}>
+            <option value="">All branches</option>
+            {LANES.map(l => <option key={l.id} value={l.id}>{l.name}</option>)}
+          </select>
+          <span style={{ position: 'absolute', right: 7, top: '50%', transform: 'translateY(-50%)', pointerEvents: 'none' }}>
+            <Icon name="chevDown" size={11} color="var(--muted)" />
+          </span>
+        </div>
+      )}
+
       <div style={{ flex: 1 }} />
 
       {/* Role pill */}
@@ -116,7 +226,7 @@ function NavBar({ currentUser, onSwitchUser, screen, onGoTo }) {
         {isManager ? 'Manager' : me && me.departing ? 'Departing' : 'Employee'}
       </Pill>
 
-      <UserSwitcher currentUser={currentUser} onSwitchUser={onSwitchUser} onSwitch={onSwitchUser} />
+      <UserSwitcher currentUser={currentUser} onSwitchUser={onSwitchUser} onSwitch={onSwitchUser} onRefresh={onRefresh} />
     </div>
   );
 }
@@ -129,6 +239,7 @@ function App() {
   const [error, setError] = useState(null);
   const [dataVersion, setDataVersion] = useState(0);
   const [currentUser, setCurrentUser] = useState('jensen');
+  const [selectedBranchId, setSelectedBranchId] = useState(null);
 
   useEffect(() => { document.documentElement.style.setProperty('--purple', t.accent); }, [t.accent]);
 
@@ -179,13 +290,14 @@ function App() {
 
   return (
     <div style={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-      <NavBar currentUser={currentUser} onSwitchUser={switchUser} screen={screen} onGoTo={goTo} />
+      <NavBar currentUser={currentUser} onSwitchUser={switchUser} screen={screen} onGoTo={goTo} onRefresh={refresh} selectedBranchId={selectedBranchId} onSelectBranch={setSelectedBranchId} />
 
       <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
         {screen === 'timeline' && (
           <TimelineScreen
             styleVariant={t.timelineStyle}
             currentUser={currentUser}
+            selectedBranchId={selectedBranchId}
             onGenerateHandover={canHandover ? () => setScreen('handover') : null}
             onRefresh={refresh} />
         )}

@@ -34,6 +34,79 @@ function buildReportFromData(branchData) {
   });
 }
 
+// ── Markdown generator ─────────────────────────────────────────────────────
+function buildMarkdown(report, person, fmtDate, NOW) {
+  const lines = [];
+  lines.push(`# Knowledge Handover — ${person.name}`);
+  lines.push(`Generated: ${fmtDate(NOW, { month: 'long', day: 'numeric', year: 'numeric' })}${person.lastDay ? '  ·  Last day: ' + person.lastDay + ', ' + new Date(NOW).getFullYear() : ''}`);
+  lines.push('');
+
+  report.forEach(r => {
+    lines.push(`---`);
+    lines.push('');
+    lines.push(`## ${r.lane.name}`);
+    lines.push(`Timeline: ${r.range || '—'}  |  Status: ${r.act ? r.act.health : 'unknown'}`);
+    lines.push('');
+
+    if (!r.es || r.es.length === 0) {
+      lines.push('*No entries recorded for this lane.*');
+      lines.push('');
+      return;
+    }
+
+    if (r.decisions && r.decisions.length) {
+      lines.push('### Key decisions');
+      r.decisions.forEach(d => {
+        const note = typeof d === 'string' ? d : d.note;
+        const hash = typeof d !== 'string' && d.hash ? ` (commit \`${d.hash}\`)` : '';
+        lines.push(`- ${note}${hash}`);
+      });
+      lines.push('');
+    }
+
+    if (r.refs && r.refs.length) {
+      lines.push('### References used');
+      r.refs.forEach(ref => {
+        const rk = typeof ref !== 'string' && ref.refKind ? `[${ref.refKind}] ` : '';
+        const title = typeof ref === 'string' ? ref : ref.title;
+        lines.push(`- ${rk}${title}`);
+      });
+      lines.push('');
+    }
+
+    if (r.deadEnds && r.deadEnds.length) {
+      lines.push('### Dead ends');
+      r.deadEnds.forEach(d => lines.push(`- ${typeof d === 'string' ? d : d.note}`));
+      lines.push('');
+    }
+
+    if (r.inProgress && r.inProgress.length) {
+      lines.push('### Still in progress');
+      r.inProgress.forEach(d => lines.push(`- ${typeof d === 'string' ? d : d.note}`));
+      lines.push('');
+    }
+
+    if (r.openTasks && r.openTasks.length) {
+      lines.push('### Open tasks');
+      r.openTasks.forEach(t => lines.push(`- [${t.state}] ${t.label || t.content}`));
+      lines.push('');
+    }
+  });
+
+  const gaps = report.filter(r => !r.es || r.es.length < 3);
+  if (gaps.length) {
+    lines.push('---');
+    lines.push('');
+    lines.push('## Coverage gaps');
+    gaps.forEach(r => {
+      const count = r.es ? r.es.length : 0;
+      lines.push(`- **${r.lane.name}** — ${count === 0 ? 'no entries recorded.' : `only ${count} entr${count === 1 ? 'y' : 'ies'} recorded.`}`);
+    });
+  }
+
+  return lines.join('\n');
+}
+
 // ── Report block ───────────────────────────────────────────────────────────
 function ReportBlock({ title, items, render }) {
   if (!items || !items.length) return null;
@@ -63,6 +136,37 @@ function HandoverReport({ report, person, onClose }) {
 
   const ping = msg => { setToast(msg); setTimeout(() => setToast(null), 1900); };
 
+  const copyMarkdown = async () => {
+    const md = buildMarkdown(report, person, fmtDate, NOW);
+    try {
+      await navigator.clipboard.writeText(md);
+      ping('Markdown copied to clipboard');
+    } catch {
+      // fallback
+      const ta = document.createElement('textarea');
+      ta.value = md;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      ping('Markdown copied to clipboard');
+    }
+  };
+
+  const downloadMarkdown = () => {
+    const md = buildMarkdown(report, person, fmtDate, NOW);
+    const blob = new Blob([md], { type: 'text/markdown' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `handover-${person.name.toLowerCase().replace(/\s+/g, '-')}.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    ping('Downloaded as Markdown');
+  };
+
   const jump = id => {
     setActive(id);
     const el = scrollRef.current.querySelector(`#sec-${id}`);
@@ -84,9 +188,8 @@ function HandoverReport({ report, person, onClose }) {
           </div>
         </div>
         <div style={{ flex: 1 }} />
-        <button className="btn" onClick={() => ping('Markdown copied to clipboard')}><Icon name="copy" size={15} color="var(--muted-2)" /> Copy as Markdown</button>
-        <button className="btn" onClick={() => ping('Preparing PDF…')}><Icon name="download" size={15} color="var(--muted-2)" /> Download PDF</button>
-        <button className="btn" onClick={() => ping('Opening in Notion…')}><Icon name="notion" size={15} color="var(--muted-2)" /> Open in Notion</button>
+        <button className="btn" onClick={copyMarkdown}><Icon name="copy" size={15} color="var(--muted-2)" /> Copy as Markdown</button>
+        <button className="btn" onClick={downloadMarkdown}><Icon name="download" size={15} color="var(--muted-2)" /> Download .md</button>
       </div>
 
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
@@ -112,7 +215,7 @@ function HandoverReport({ report, person, onClose }) {
           <div style={{ width: 660, maxWidth: '90%', margin: '0 auto' }}>
             <div style={{ fontSize: 26, fontWeight: 700, letterSpacing: '-.01em', marginBottom: 6 }}>Knowledge Handover</div>
             <div style={{ fontSize: 14, color: 'var(--muted-2)', marginBottom: 30 }}>
-              Prepared for {person.name}'s transition{person.lastDay ? ` · last day ${person.lastDay}, 2026` : ''}
+              Prepared for {person.name}'s transition{person.lastDay ? ` · last day ${person.lastDay}, ${new Date(NOW).getFullYear()}` : ''}
             </div>
 
             {report.map(r => (
