@@ -570,6 +570,7 @@ function CreateTaskModal({ pos, lane, onClose, onRefresh }) {
       created_by: CURRENT_USER,
       assigned_to: assignTo || null,
       assignment_status: assignTo ? 'pending' : null,
+      date: pos.date || undefined,
       metadata: { body: body.trim() || undefined, due: due || undefined },
     });
     setSaving(false);

@@ -178,6 +178,15 @@ def create_app():
                 meta = dict(meta)
                 meta['title'] = fetched
 
+        raw_date = data.get('date')
+        if raw_date:
+            try:
+                created_at = datetime.fromisoformat(raw_date.replace('Z', '+00:00')).replace(tzinfo=None)
+            except ValueError:
+                created_at = datetime.utcnow()
+        else:
+            created_at = datetime.utcnow()
+
         n = Node(
             branch_id=branch_id,
             created_by=data.get('created_by', 'jensen'),
@@ -186,6 +195,7 @@ def create_app():
             assigned_to=data.get('assigned_to'),
             assignment_status=data.get('assignment_status'),
             is_ai_generated=data.get('is_ai_generated', False),
+            created_at=created_at,
         )
         n.meta = meta
         db.session.add(n)
