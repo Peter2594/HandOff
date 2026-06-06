@@ -1354,15 +1354,15 @@ function Lane({ lane, style, filters, hiddenUsers, onSelect, onTaskSelect, onQui
 }
 
 // ── Branch fork SVG overlay ───────────────────────────────────────────────
-function BranchForkOverlay({ containerW, style }) {
-  const { LANES, frac } = window.HANDOFF;
+function BranchForkOverlay({ containerW, style, lanes }) {
+  const { frac } = window.HANDOFF;
   const LABEL_W = style.labelW;
   const TRACK_PAD = 70;
 
   const laneIndexMap = {};
-  LANES.forEach((l, i) => { laneIndexMap[l.id] = i; });
+  lanes.forEach((l, i) => { laneIndexMap[l.id] = i; });
 
-  const forks = LANES.flatMap(child => {
+  const forks = lanes.flatMap(child => {
     if (!child.parent_id) return [];
     const pi = laneIndexMap[child.parent_id];
     const ci = laneIndexMap[child.id];
@@ -1375,7 +1375,7 @@ function BranchForkOverlay({ containerW, style }) {
 
   if (!forks.length) return null;
 
-  const totalH = LANES.length * style.laneH;
+  const totalH = lanes.length * style.laneH;
   return (
     <svg style={{ position: 'absolute', top: 0, left: 0, width: containerW, height: totalH, pointerEvents: 'none', zIndex: 4 }} overflow="visible">
       {forks.map(({ x, py, cy, id }) => {
@@ -1400,8 +1400,8 @@ function BranchForkOverlay({ containerW, style }) {
 }
 
 // ── Decision thread SVG overlay ────────────────────────────────────────────
-function DecisionThreadOverlay({ decisionFocus, viewMode, fracAdjAll, containerW, style, hoveredNodeId }) {
-  const { LANES, ENTRIES, TASKS, LINKS, TYPE_META } = window.HANDOFF;
+function DecisionThreadOverlay({ decisionFocus, viewMode, fracAdjAll, containerW, style, hoveredNodeId, lanes }) {
+  const { ENTRIES, TASKS, LINKS, TYPE_META } = window.HANDOFF;
   const showAll = viewMode === 'decision-flow' && !decisionFocus;
   const links = showAll ? (LINKS || []) : (decisionFocus?.links || []);
   if (!links.length) return null;
@@ -1413,9 +1413,9 @@ function DecisionThreadOverlay({ decisionFocus, viewMode, fracAdjAll, containerW
     ? (() => { const n = [...ENTRIES, ...TASKS].find(x => x.id === hoveredNodeId); return n?.nodeId ?? null; })()
     : null;
 
-  // Map frontend node id → lane index
+  // Map frontend node id → visible lane index
   const laneIdxMap = {};
-  LANES.forEach((l, i) => {
+  lanes.forEach((l, i) => {
     [...ENTRIES, ...TASKS].filter(e => e.lane === l.id).forEach(e => { laneIdxMap[e.id] = i; });
   });
 
@@ -1436,7 +1436,7 @@ function DecisionThreadOverlay({ decisionFocus, viewMode, fracAdjAll, containerW
     };
   };
 
-  const totalH = LANES.length * style.laneH;
+  const totalH = lanes.length * style.laneH;
 
   return (
     <svg style={{ position: 'absolute', top: 0, left: 0, width: containerW, height: totalH, pointerEvents: 'none', zIndex: 6 }} overflow="visible">
@@ -1794,14 +1794,15 @@ function TimelineScreen({ styleVariant = 'railway', currentUser, selectedBranchI
                 viewMode={viewMode}
                 onNodeHover={setHoveredNodeId} />
             ))}
-            <BranchForkOverlay containerW={containerW} style={style} />
+            <BranchForkOverlay containerW={containerW} style={style} lanes={visibleLanes} />
             <DecisionThreadOverlay
               decisionFocus={decisionFocus}
               viewMode={viewMode}
               fracAdjAll={fracAdjAll}
               containerW={containerW}
               style={style}
-              hoveredNodeId={hoveredNodeId} />
+              hoveredNodeId={hoveredNodeId}
+              lanes={visibleLanes} />
           </div>
         </div>
         <TeamPanel hiddenUsers={hiddenUsers} onToggle={toggleUser} onRefresh={onRefresh} />
