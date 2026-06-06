@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Handoff</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" crossorigin="anonymous"></script>
+
+<!-- load order matters: icons → api → screens → app -->
+<script type="text/babel" src="/static/icons.jsx"></script>
+<script type="text/babel" src="/static/tweaks-panel.jsx"></script>
+<script type="text/babel" src="/static/api.js"></script>
+<script type="text/babel" src="/static/timeline.jsx"></script>
+<script type="text/babel" src="/static/personal-log.jsx"></script>
+<script type="text/babel" src="/static/handover.jsx"></script>
+<script type="text/babel" src="/static/task-list.jsx"></script>
+<script type="text/babel" src="/static/manager-dashboard.jsx"></script>
+<script type="text/babel" src="/static/context.jsx"></script>
+<script type="text/babel" src="/static/app.jsx"></script>
+</body>
+</html>

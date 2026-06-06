@@ -1,0 +1,493 @@
+import os
+import json
+import logging
+import threading
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+from dotenv import load_dotenv
+
+from models import db, Project, User, Branch, Node, Contact, NodeLink
+from ai_service import AIService
+
+load_dotenv()
+
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+FRONTEND_DIR = os.path.join(BASE_DIR, 'frontend')
+
+
+def create_app():
+    app = Flask(__name__, static_folder=FRONTEND_DIR, static_url_path='/static')
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL', f'sqlite:///{os.path.join(BASE_DIR, "handoff.db")}')
+    app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+    CORS(app)
+    db.init_app(app)
+
+    ai = AIService()
+
+    with app.app_context():
+        db.create_all()
+        # Migrate: add columns introduced after initial schema
+        from sqlalchemy import text, inspect as sa_inspect
+        inspector = sa_inspect(db.engine)
+        existing = [c['name'] for c in inspector.get_columns('branch')]
+        existing_proj = [c['name'] for c in inspector.get_columns('project')]
+        with db.engine.connect() as conn:
+            if 'ai_context' not in existing:
+                conn.execute(text("ALTER TABLE branch ADD COLUMN ai_context TEXT DEFAULT ''"))
+            if 'ai_context_updated_at' not in existing:
+                conn.execute(text("ALTER TABLE branch ADD COLUMN ai_context_updated_at DATETIME"))
+            if 'nodes_since_context_sync' not in existing:
+                conn.execute(text("ALTER TABLE branch ADD COLUMN nodes_since_context_sync INTEGER DEFAULT 0"))
+            if 'nodes_since_last_link' not in existing_proj:
+                conn.execute(text("ALTER TABLE project ADD COLUMN nodes_since_last_link INTEGER DEFAULT 0"))
+            if 'last_linked_at' not in existing_proj:
+                conn.execute(text("ALTER TABLE project ADD COLUMN last_linked_at DATETIME"))
+            conn.commit()
+        from seed import seed_if_empty
+        seed_if_empty()
+
+    # ── Frontend ────────────────────────────────────────────────────────────
+    @app.route('/')
+    def index():
+        return send_from_directory(FRONTEND_DIR, 'index.html')
+
+    # ── Project ─────────────────────────────────────────────────────────────
+    @app.route('/api/project')
+    def get_project():
+        p = Project.query.first()
+        if not p:
+            return jsonify({'error': 'No project found'}), 404
+        return jsonify(p.to_dict())
+
+    @app.route('/api/project', methods=['PATCH'])
+    def update_project():
+        p = Project.query.first()
+        if not p:
+            return jsonify({'error': 'No project found'}), 404
+        data = request.get_json()
+        if 'context_doc' in data:
+            p.context_doc = data['context_doc']
+        db.session.commit()
+        return jsonify(p.to_dict())
+
+    # ── Users ────────────────────────────────────────────────────────────────
+    @app.route('/api/users')
+    def get_users():
+        users = User.query.all()
+        return jsonify([u.to_dict() for u in users])
+
+    # ── Branches ─────────────────────────────────────────────────────────────
+    @app.route('/api/branches')
+    def get_branches():
+        branches = Branch.query.filter_by(archived_at=None).order_by(Branch.id).all()
+        return jsonify([b.to_dict() for b in branches])
+
+    @app.route('/api/branches', methods=['POST'])
+    def create_branch():
+        data = request.get_json()
+        name = data.get('name', '').strip()
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
+        slug = name.lower().replace(' ', '-').replace('/', '-')[:40]
+        # ensure unique slug
+        existing = Branch.query.filter_by(slug=slug).first()
+        if existing:
+            slug = f"{slug}-{Branch.query.count()}"
+        b = Branch(
+            name=name,
+            slug=slug,
+            parent_branch_id=data.get('parent_branch_id'),
+            created_by=data.get('created_by', 'jensen'),
+            context_doc=data.get('context_doc', ''),
+        )
+        db.session.add(b)
+        db.session.commit()
+        return jsonify(b.to_dict()), 201
+
+    @app.route('/api/branches/<int:branch_id>', methods=['PATCH'])
+    def update_branch(branch_id):
+        b = Branch.query.get_or_404(branch_id)
+        data = request.get_json()
+        if 'context_doc' in data:
+            b.context_doc = data['context_doc']
+        if 'running_summary' in data:
+            b.running_summary = data['running_summary']
+            b.running_summary_updated_at = datetime.utcnow()
+        if 'ai_context' in data:
+            b.ai_context = data['ai_context']
+            b.ai_context_updated_at = datetime.utcnow()
+            b.nodes_since_context_sync = 0
+        db.session.commit()
+        return jsonify(b.to_dict())
+
+    # ── Nodes ─────────────────────────────────────────────────────────────────
+    @app.route('/api/nodes')
+    def get_nodes():
+        q = Node.query
+        branch_id = request.args.get('branch_id', type=int)
+        if branch_id:
+            q = q.filter_by(branch_id=branch_id)
+        user_id = request.args.get('user_id')
+        if user_id:
+            q = q.filter(
+                (Node.created_by == user_id) | (Node.assigned_to == user_id)
+            )
+        nodes = q.order_by(Node.created_at).all()
+        return jsonify([n.to_dict() for n in nodes])
+
+    @app.route('/api/nodes', methods=['POST'])
+    def create_node():
+        data = request.get_json()
+        branch_id = data.get('branch_id')
+        if not branch_id:
+            return jsonify({'error': 'branch_id is required'}), 400
+        b = Branch.query.get_or_404(branch_id)
+
+        node_type = data.get('type', 'note')
+        meta = data.get('metadata', {})
+        # Derive content from metadata title or raw content
+        content = data.get('content') or meta.get('title') or 'Untitled'
+
+        n = Node(
+            branch_id=branch_id,
+            created_by=data.get('created_by', 'jensen'),
+            type=node_type,
+            content=content,
+            assigned_to=data.get('assigned_to'),
+            assignment_status=data.get('assignment_status'),
+            is_ai_generated=data.get('is_ai_generated', False),
+        )
+        n.meta = meta
+        db.session.add(n)
+
+        # Increment staleness counters
+        b.nodes_since_context_sync += 1
+        b.node_count_since_last_summary += 1
+        project = Project.query.first()
+        if project:
+            project.nodes_since_last_link = (project.nodes_since_last_link or 0) + 1
+        context_updating = False
+        if b.node_count_since_last_summary >= 5:
+            b.node_count_since_last_summary = 0
+            b.context_updating = True
+            context_updating = True
+
+        db.session.commit()
+
+        if context_updating:
+            _trigger_summary_update(app, ai, b.id)
+
+        return jsonify({**n.to_dict(), 'context_updating': context_updating}), 201
+
+    @app.route('/api/nodes/<int:node_id>', methods=['PATCH'])
+    def update_node(node_id):
+        n = Node.query.get_or_404(node_id)
+        data = request.get_json()
+        if 'assignment_status' in data:
+            n.assignment_status = data['assignment_status']
+        if 'content' in data:
+            n.content = data['content']
+        if 'metadata' in data:
+            n.meta = data['metadata']
+        db.session.commit()
+        return jsonify(n.to_dict())
+
+    # ── Node links ────────────────────────────────────────────────────────────
+    @app.route('/api/links')
+    def get_links():
+        links = NodeLink.query.all()
+        return jsonify([l.to_dict() for l in links])
+
+    @app.route('/api/links', methods=['POST'])
+    def create_link():
+        data = request.get_json()
+        nl = NodeLink(
+            from_id=data['from_id'],
+            to_id=data['to_id'],
+            rel=data.get('rel', 'implements'),
+            is_ai=False,
+        )
+        db.session.add(nl)
+        db.session.commit()
+        return jsonify(nl.to_dict()), 201
+
+    @app.route('/api/links/<int:link_id>', methods=['DELETE'])
+    def delete_link(link_id):
+        nl = NodeLink.query.get_or_404(link_id)
+        db.session.delete(nl)
+        db.session.commit()
+        return jsonify({'ok': True})
+
+    @app.route('/api/ai/link-decisions', methods=['POST'])
+    def link_all_decisions():
+        """Trigger AI linking for every decision node across all branches."""
+        decisions = Node.query.filter_by(type='decision').all()
+        project = Project.query.first()
+        if project:
+            project.nodes_since_last_link = 0
+            project.last_linked_at = datetime.utcnow()
+            db.session.commit()
+        for n in decisions:
+            _trigger_decision_links(app, ai, n.id)
+        return jsonify({'ok': True, 'count': len(decisions),
+                        'status': f'linking started for {len(decisions)} decision(s)'})
+
+    @app.route('/api/ai/link-decisions/<int:node_id>', methods=['POST'])
+    def relink_decision(node_id):
+        n = Node.query.get_or_404(node_id)
+        if n.type != 'decision':
+            return jsonify({'error': 'not a decision node'}), 400
+        _trigger_decision_links(app, ai, n.id)
+        return jsonify({'ok': True, 'status': 'linking started'})
+
+    # ── Contacts ──────────────────────────────────────────────────────────────
+    @app.route('/api/contacts')
+    def get_contacts():
+        p = Project.query.first()
+        if not p:
+            return jsonify([])
+        contacts = Contact.query.filter_by(project_id=p.id).order_by(Contact.name).all()
+        return jsonify([c.to_dict() for c in contacts])
+
+    @app.route('/api/contacts', methods=['POST'])
+    def create_contact():
+        data = request.get_json()
+        p = Project.query.first()
+        if not p:
+            return jsonify({'error': 'No project'}), 400
+        name = data.get('name', '').strip()
+        if not name:
+            return jsonify({'error': 'name is required'}), 400
+        c = Contact(
+            project_id=p.id,
+            name=name,
+            company=data.get('company', '').strip(),
+            role=data.get('role', '').strip(),
+            email=data.get('email', '').strip(),
+            notes=data.get('notes', '').strip(),
+        )
+        db.session.add(c)
+        db.session.commit()
+        return jsonify(c.to_dict()), 201
+
+    @app.route('/api/contacts/<int:contact_id>', methods=['PATCH'])
+    def update_contact(contact_id):
+        c = Contact.query.get_or_404(contact_id)
+        data = request.get_json()
+        for field in ['name', 'company', 'role', 'email', 'notes']:
+            if field in data:
+                setattr(c, field, data[field].strip() if data[field] else '')
+        db.session.commit()
+        return jsonify(c.to_dict())
+
+    @app.route('/api/contacts/<int:contact_id>', methods=['DELETE'])
+    def delete_contact(contact_id):
+        c = Contact.query.get_or_404(contact_id)
+        db.session.delete(c)
+        db.session.commit()
+        return jsonify({'ok': True})
+
+    # ── Activity feed ─────────────────────────────────────────────────────────
+    @app.route('/api/activity')
+    def get_activity():
+        limit = request.args.get('limit', 20, type=int)
+        nodes = Node.query.order_by(Node.created_at.desc()).limit(limit).all()
+        result = []
+        for n in nodes:
+            d = n.to_dict()
+            branch = db.session.get(Branch, n.branch_id)
+            user = db.session.get(User, n.created_by)
+            d['branch_name'] = branch.name if branch else '?'
+            d['branch_slug'] = branch.slug if branch else str(n.branch_id)
+            d['user_name'] = user.name if user else '?'
+            d['user_color'] = user.color if user else '#7F77DD'
+            d['user_initials'] = user.initials if user else '?'
+            result.append(d)
+        return jsonify(result)
+
+    # ── AI endpoints ──────────────────────────────────────────────────────────
+    @app.route('/api/ai/sync-context/<int:branch_id>', methods=['POST'])
+    def sync_context(branch_id):
+        b = Branch.query.get_or_404(branch_id)
+        project = Project.query.first()
+        nodes = [n.to_dict() for n in b.nodes if n.type != 'task']
+        result = ai.sync_context(
+            project.to_dict() if project else {},
+            b.to_dict(),
+            nodes,
+        )
+        b.ai_context = result
+        b.ai_context_updated_at = datetime.utcnow()
+        b.nodes_since_context_sync = 0
+        db.session.commit()
+        return jsonify(b.to_dict())
+
+    @app.route('/api/ai/parse-log', methods=['POST'])
+    def parse_log():
+        data = request.get_json()
+        branch_id = data.get('branch_id')
+        text = data.get('text', '')
+        if not text.strip():
+            return jsonify([])
+        b = Branch.query.get_or_404(branch_id)
+        project = Project.query.first()
+        parsed = ai.parse_log(
+            project.to_dict() if project else {},
+            b.to_dict(),
+            text,
+        )
+        return jsonify(parsed)
+
+    @app.route('/api/ai/weekly-digest', methods=['POST'])
+    def weekly_digest():
+        data = request.get_json()
+        user_id = data.get('user_id', 'jensen')
+        user = User.query.get_or_404(user_id)
+        project = Project.query.first()
+
+        # Nodes from past 7 days for this user
+        since = datetime.utcnow() - timedelta(days=7)
+        nodes = (Node.query
+                 .filter(Node.created_by == user_id)
+                 .filter(Node.created_at >= since)
+                 .filter(Node.type != 'task')
+                 .order_by(Node.created_at)
+                 .all())
+
+        # Group by branch
+        branch_map = {}
+        for n in nodes:
+            branch_map.setdefault(n.branch_id, []).append(n.to_dict())
+
+        branch_nodes = []
+        for bid, ns in branch_map.items():
+            b = Branch.query.get(bid)
+            if b:
+                branch_nodes.append({'branch_name': b.name, 'nodes': ns})
+
+        result = ai.generate_weekly_digest(
+            project.to_dict() if project else {},
+            user.to_dict(),
+            branch_nodes,
+        )
+        return jsonify(result)
+
+    @app.route('/api/ai/handover', methods=['POST'])
+    def handover():
+        data = request.get_json()
+        user_id = data.get('user_id', 'jensen')
+        user = User.query.get_or_404(user_id)
+        project = Project.query.first()
+        branches = Branch.query.filter_by(archived_at=None).order_by(Branch.id).all()
+
+        branch_data = []
+        for b in branches:
+            entry_nodes = [n.to_dict() for n in b.nodes if n.type != 'task']
+            task_nodes = [n.to_dict() for n in b.nodes if n.type == 'task']
+            branch_data.append({
+                'branch': b.to_dict(),
+                'nodes': entry_nodes,
+                'tasks': task_nodes,
+            })
+
+        ai_result = ai.generate_handover(
+            project.to_dict() if project else {},
+            user.to_dict(),
+            branch_data,
+        )
+
+        # Return either AI result or raw branch data for client-side heuristics
+        if ai_result:
+            return jsonify({'source': 'ai', 'sections': ai_result})
+        else:
+            return jsonify({'source': 'heuristic', 'branch_data': branch_data})
+
+    return app
+
+
+def _trigger_decision_links(app, ai, decision_node_id):
+    """Background: scout branches then generate causal links for a decision node."""
+    def run():
+        with app.app_context():
+            n = db.session.get(Node, decision_node_id)
+            if not n or n.type != 'decision':
+                return
+            project = Project.query.first()
+            branches = Branch.query.filter_by(archived_at=None).all()
+            proj_dict = project.to_dict() if project else {}
+            decision_dict = n.to_dict()
+
+            branch_summaries = [
+                {'slug': b.slug, 'name': b.name,
+                 'summary': (b.ai_context or b.running_summary or '')[:800]}
+                for b in branches
+            ]
+
+            # Pass 1: scout which branches to scan in detail
+            relevant_slugs = set(
+                ai.scout_decision_branches(proj_dict, decision_dict, branch_summaries) or
+                [b.slug for b in branches]
+            )
+            # Always include the decision's own branch
+            own_branch = next((b for b in branches if b.id == n.branch_id), None)
+            if own_branch:
+                relevant_slugs.add(own_branch.slug)
+
+            # Pass 2: link against full node lists from relevant branches
+            nodes_by_branch = {
+                b.slug: [nd.to_dict() for nd in b.nodes if nd.type != 'task' and nd.id != n.id]
+                for b in branches if b.slug in relevant_slugs
+            }
+
+            links = ai.link_decision_to_nodes(proj_dict, decision_dict, nodes_by_branch)
+
+            # Replace existing AI links for this decision
+            NodeLink.query.filter_by(from_id=n.id, is_ai=True).delete()
+            for lnk in (links or []):
+                db.session.add(NodeLink(
+                    from_id=lnk['from_id'],
+                    to_id=lnk['to_id'],
+                    rel=lnk.get('rel', 'implements'),
+                    is_ai=True,
+                ))
+            db.session.commit()
+            logger.info('Decision links for node %d: %d links stored', n.id, len(links or []))
+
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _trigger_summary_update(app, ai, branch_id):
+    """Spawn background thread to update running summary after 5 new nodes."""
+    def run():
+        with app.app_context():
+            b = Branch.query.get(branch_id)
+            if not b:
+                return
+            project = Project.query.first()
+            nodes = [n.to_dict() for n in b.nodes if n.type != 'task']
+            try:
+                summary = ai.update_running_summary(
+                    project.to_dict() if project else {},
+                    b.to_dict(),
+                    nodes,
+                )
+                b.running_summary = summary
+                b.running_summary_updated_at = datetime.utcnow()
+            except Exception as e:
+                print(f'Summary update failed for branch {branch_id}: {e}')
+            finally:
+                b.context_updating = False
+                db.session.commit()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+
+
+if __name__ == '__main__':
+    application = create_app()
+    application.run(debug=True, port=5001, threaded=True)
